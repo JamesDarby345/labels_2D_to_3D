@@ -17,6 +17,8 @@ dependencies:
   - dask
   - dask-image
   - tqdm
+  - numba
   - pip:
     - pymeshlab
+    - fastmorph
 

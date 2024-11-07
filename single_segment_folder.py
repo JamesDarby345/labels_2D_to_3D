@@ -329,7 +329,7 @@ if __name__ == "__main__":
                         default='vr-hz-base',
                         help='Subdirectory name under overlays/ containing the overlay files')
     parser.add_argument('--radius', type=int,
-                        default=1,
+                        default=0,
                         help='Radius of the additonal neighbourhood to include when projecting labels on normals')
 
     args = parser.parse_args()
