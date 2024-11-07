@@ -1,0 +1,4 @@
+/output
+/other_ppm_implementations
+/__pycache__
+*.zarr

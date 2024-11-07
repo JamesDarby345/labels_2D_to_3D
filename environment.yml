@@ -1,0 +1,22 @@
+name: 2d3d
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy<2
+  - scipy
+  - pip
+  - h5py
+  - open3d
+  - opencv
+  - pillow
+  - tqdm
+  - pytorch
+  - zarr
+  - dask
+  - dask-image
+  - tqdm
+  - pip:
+    - pymeshlab
+
