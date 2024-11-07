@@ -8,9 +8,7 @@ from ppm import Ppm
 from typing import Optional, Dict
 import zarr
 import dask.array as da
-from tqdm import tqdm
-from dask_image.ndmorph import binary_closing
-from dask.diagnostics import ProgressBar
+
 
 def get_neighbors(radius):
     """Returns array of 3D neighbor offsets within given radius"""
@@ -126,7 +124,7 @@ def depth_overlay_2d_to_3d_zarr(zarr_path, ppm_path, ppm_mask_path, overlay_fold
             fill_value=0
         )
     
-    # Load zarr as dask array
+    # Load zarr
     z = zarr.open(zarr_path, mode='r+')
     if isinstance(z, zarr.hierarchy.Group):
         z = z[0]
