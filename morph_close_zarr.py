@@ -85,9 +85,14 @@ def dask_morph_close_chunks_zarr(zarr_path, chunk_size=512, radius=16, output_za
             
         arr = np.array(block)  
         arr = np.pad(arr, pad_width=radius, mode='constant', constant_values=0)
-        arr = fastmorph.dilate(arr, parallel=fast_morph_parallel)
-        arr = fastmorph.erode(arr, parallel=fast_morph_parallel)
-        return arr[radius:-radius,radius:-radius,radius:-radius]
+        original_arr = np.copy(arr)  # Explicitly use np.copy() for deep copy
+        morph_arr = fastmorph.dilate(arr, parallel=fast_morph_parallel)
+        morph_arr = fastmorph.erode(morph_arr, parallel=fast_morph_parallel)
+        # Restore original nonzero values that were zeroed out
+        mask = (original_arr > 0) & (morph_arr == 0)
+        morph_arr[mask] = original_arr[mask]
+        # morph_arr = fastmorph.close(morph_arr, parallel=fast_morph_parallel)
+        return morph_arr[radius:-radius,radius:-radius,radius:-radius]
 
     
     closed_data = data.map_blocks(morph_close_chunk, dtype=data.dtype, meta=True)#.compute(scheduler='processes')
