@@ -8,7 +8,138 @@ from ppm import Ppm
 from typing import Optional, Dict
 import zarr
 import dask.array as da
+import multiprocessing as mp
+from tqdm import tqdm
+from functools import partial
 
+def depth_overlay_2d_to_3d_zarr(zarr_path, ppm_path, ppm_mask_path, overlay_folder_path, surf_val=32, zarr_size=(256,256,256), zarr_chunks=(128,128,128), z_range=None, radius=1, dir=1):
+    try:
+        # Check if required files/folders exist
+        if not os.path.exists(ppm_path):
+            raise FileNotFoundError(f"PPM file not found: {ppm_path}")
+        if not os.path.exists(ppm_mask_path):
+            raise FileNotFoundError(f"PPM mask file not found: {ppm_mask_path}")
+        if not os.path.exists(overlay_folder_path):
+            raise FileNotFoundError(f"Overlay folder not found: {overlay_folder_path}")
+
+        # Create zarr if it doesn't exist
+        if not os.path.exists(zarr_path):
+            zarr.create(
+                shape=zarr_size,
+                chunks=zarr_chunks,
+                dtype=np.uint8,
+                store=zarr_path,
+                fill_value=0
+            )
+        
+        # Load zarr
+        z = zarr.open(zarr_path, mode='r+')
+        if isinstance(z, zarr.hierarchy.Group):
+            z = z[0]
+        # data = da.from_zarr(z, chunks=(256,256,256))
+        
+        # Load PPM and mask
+        ppm = Ppm.loadPpm(Path(ppm_path))
+        ppm.loadData()
+        ppm_mask = cv2.imread(ppm_mask_path, cv2.IMREAD_GRAYSCALE)
+        overlay_manager = DataSliceManager(overlay_folder_path)
+        overlay_manager.z_range = z_range
+        
+        # print(f"Found {len(overlay_manager.z_values)} overlay files")
+        
+        # Process each overlay
+        for z_value in overlay_manager.z_values:
+            overlay = overlay_manager.get_data(z_value)
+            if overlay is None:
+                continue
+                
+            # print(f"Processing overlay for z-value: {z_value}")
+            
+            # Add these debug prints right after loading the overlay
+            # print(f"Initial overlay unique values: {np.unique(overlay)}")
+            # print(f"Initial overlay > 0 count: {np.count_nonzero(overlay > 0)}")
+
+            # Check the initial rows/cols
+            rows, cols = np.where(overlay > 0)
+            # print(f"Initial rows/cols count: {len(rows)}")
+            
+            # Filter using ppm_mask
+            if ppm_mask is not None:
+                # print(f"PPM mask shape: {ppm_mask.shape}")
+                # print(f"PPM mask unique values: {np.unique(ppm_mask)}")
+                mask = ppm_mask[rows, cols] > 0
+                # print(f"Points remaining after ppm_mask: {np.count_nonzero(mask)}")
+                rows = rows[mask]
+                cols = cols[mask]
+                
+            # print(f"Overlay shape: {overlay.shape}")
+            # print(rows.shape, cols.shape)
+            # Get 3D points
+            coords = np.stack([rows, cols], axis=-1).astype(np.float64)
+            xyz_points = ppm.ijk_interpolator(coords)
+            
+            # Apply offset from normal
+            if z_value != surf_val:
+                normals = ppm.normal_interpolator(coords)
+                xyz_points += dir * normals * (z_value - surf_val)
+            
+            # Convert to voxel coordinates and filter out-of-bounds points
+            voxel_coords = xyz_points.astype(np.int32)
+            # print(f"Voxel coord ranges before bounds check:")
+            # print(f"X: {voxel_coords[:,0].min()}-{voxel_coords[:,0].max()}")
+            # print(f"Y: {voxel_coords[:,1].min()}-{voxel_coords[:,1].max()}")
+            # print(f"Z: {voxel_coords[:,2].min()}-{voxel_coords[:,2].max()}")
+            # print(f"Voxel coords shape: {voxel_coords.shape}")
+            # print(f"Zarr size: {zarr_size}")
+
+            # zarr coords are z,y,x voxels coords are xyz here...
+            mask = (
+                (voxel_coords[:, 2] >= 0) & (voxel_coords[:, 2] < zarr_size[0]) &
+                (voxel_coords[:, 1] >= 0) & (voxel_coords[:, 1] < zarr_size[1]) &
+                (voxel_coords[:, 0] >= 0) & (voxel_coords[:, 0] < zarr_size[2])
+            )
+            # print(f"Points remaining after bounds check: {np.count_nonzero(mask)}")
+            valid_coords = voxel_coords[mask]
+            valid_values = overlay[rows[mask], cols[mask]]
+            # print("valid_coords.shape, valid_values.shape", valid_coords.shape, valid_values.shape)
+            
+            # print(valid_coords[:, 2].max(), valid_coords[:, 1].max(), valid_coords[:, 0].max())
+            # print(valid_coords[:, 2].min(), valid_coords[:, 1].min(), valid_coords[:, 0].min())
+            # print(np.unique(valid_values))
+            
+            # Set initial voxels
+            z[valid_coords[:, 2], valid_coords[:, 1], valid_coords[:, 0]] = valid_values
+            
+            neighbors = get_neighbors(radius)
+            for dx, dy, dz in neighbors:
+                neighbor_coords = valid_coords + np.array([dx, dy, dz])
+                #zarr zyx coords, voxel coords xyz here...
+                neighbor_mask = (
+                    (neighbor_coords[:, 2] >= 0) & (neighbor_coords[:, 2] < zarr_size[0]) &
+                    (neighbor_coords[:, 1] >= 0) & (neighbor_coords[:, 1] < zarr_size[1]) &
+                    (neighbor_coords[:, 0] >= 0) & (neighbor_coords[:, 0] < zarr_size[2])
+                )
+                
+                # Only set neighbor voxels that are within bounds and currently 0
+                valid_neighbors = neighbor_coords[neighbor_mask]
+                if len(valid_neighbors) > 0:
+                    current_values = z[valid_neighbors[:, 2], valid_neighbors[:, 1], valid_neighbors[:, 0]]
+                    zero_mask = current_values == 0
+                    if np.any(zero_mask):
+                        z[valid_neighbors[zero_mask, 2], 
+                        valid_neighbors[zero_mask, 1], 
+                        valid_neighbors[zero_mask, 0]] = valid_values[neighbor_mask][zero_mask]
+        
+        print("Finished processing overlays")
+        
+    except Exception as e:
+        error_msg = f"Error processing segment: {str(e)}"
+        # If called directly, raise the error
+        if __name__ == "__main__":
+            raise Exception(error_msg)
+        # If called from multi_segment_folder, just print and return
+        print(error_msg)
+        return
 
 def get_neighbors(radius):
     """Returns array of 3D neighbor offsets within given radius"""
@@ -27,7 +158,7 @@ def get_neighbors(radius):
                 # Check if point is within radius
                 if (x*x + y*y + z*z) <= radius*radius:
                     neighbors.append((x, y, z))
-    print(neighbors)
+    # print(neighbors)
     return neighbors
 
 def create_point_cloud(ppm, overlay, ppm_mask=None, color=None, z_diff=0, layer=None):
@@ -103,127 +234,114 @@ class DataSliceManager:
             values = [z for z in values if z in self.z_range]
         return values
     
+def process_single_z(z_value, z, zarr_size, ppm, ppm_mask, overlay_manager, surf_val, radius, dir):
+    """Process a single z-value and write directly to zarr"""
+    overlay = overlay_manager.get_data(z_value)
+    if overlay is None:
+        return
+        
+    # Get initial points
+    rows, cols = np.where(overlay > 0)
+    
+    # Filter using ppm_mask
+    if ppm_mask is not None:
+        mask = ppm_mask[rows, cols] > 0
+        rows = rows[mask]
+        cols = cols[mask]
+    
+    # Get 3D points
+    coords = np.stack([rows, cols], axis=-1).astype(np.float64)
+    xyz_points = ppm.ijk_interpolator(coords)
+    
+    # Apply offset from normal
+    if z_value != surf_val:
+        normals = ppm.normal_interpolator(coords)
+        xyz_points += dir * normals * (z_value - surf_val)
+    
+    # Convert to voxel coordinates and filter out-of-bounds points
+    voxel_coords = xyz_points.astype(np.int32)
+    mask = (
+        (voxel_coords[:, 2] >= 0) & (voxel_coords[:, 2] < zarr_size[0]) &
+        (voxel_coords[:, 1] >= 0) & (voxel_coords[:, 1] < zarr_size[1]) &
+        (voxel_coords[:, 0] >= 0) & (voxel_coords[:, 0] < zarr_size[2])
+    )
+    
+    valid_coords = voxel_coords[mask]
+    valid_values = overlay[rows[mask], cols[mask]]
+    
+    # Write initial points
+    z[valid_coords[:, 2], valid_coords[:, 1], valid_coords[:, 0]] = valid_values
+    
+    # Process and write neighbors
+    neighbors = get_neighbors(radius)
+    for dx, dy, dz in neighbors:
+        neighbor_coords = valid_coords + np.array([dx, dy, dz])
+        neighbor_mask = (
+            (neighbor_coords[:, 2] >= 0) & (neighbor_coords[:, 2] < zarr_size[0]) &
+            (neighbor_coords[:, 1] >= 0) & (neighbor_coords[:, 1] < zarr_size[1]) &
+            (neighbor_coords[:, 0] >= 0) & (neighbor_coords[:, 0] < zarr_size[2])
+        )
+        
+        valid_neighbors = neighbor_coords[neighbor_mask]
+        if len(valid_neighbors) > 0:
+            current_values = z[valid_neighbors[:, 2], valid_neighbors[:, 1], valid_neighbors[:, 0]]
+            zero_mask = current_values == 0
+            if np.any(zero_mask):
+                z[valid_neighbors[zero_mask, 2], 
+                  valid_neighbors[zero_mask, 1], 
+                  valid_neighbors[zero_mask, 0]] = valid_values[neighbor_mask][zero_mask]
 
-def parse_label_list(label_str):
-    """Parse a string of comma-separated numbers into a list of ints"""
-    if not label_str:
-        return None
+def parallel_depth_overlay_2d_to_3d_zarr(zarr_path, ppm_path, ppm_mask_path, overlay_folder_path, surf_val=32, 
+                               zarr_size=(256,256,256), zarr_chunks=(128,128,128), z_range=None, 
+                               radius=1, dir=1, num_workers=4):
     try:
-        return [int(x) for x in label_str.strip('[]').split(',')]
-    except ValueError:
-        raise argparse.ArgumentTypeError('Labels must be comma-separated integers, e.g. "1,2" or "[255]"')
-    
-def depth_overlay_2d_to_3d_zarr(zarr_path, ppm_path, ppm_mask_path, overlay_folder_path, surf_val=32, zarr_size=(256,256,256), zarr_chunks=(128,128,128), z_range=None, radius=1, dir=1):
-    # Create zarr if it doesn't exist
-    if not os.path.exists(zarr_path):
-        zarr.create(
-            shape=zarr_size,
-            chunks=zarr_chunks,
-            dtype=np.uint8,
-            store=zarr_path,
-            fill_value=0
-        )
-    
-    # Load zarr
-    z = zarr.open(zarr_path, mode='r+')
-    if isinstance(z, zarr.hierarchy.Group):
-        z = z[0]
-    # data = da.from_zarr(z, chunks=(256,256,256))
-    
-    # Load PPM and mask
-    ppm = Ppm.loadPpm(Path(ppm_path))
-    ppm.loadData()
-    ppm_mask = cv2.imread(ppm_mask_path, cv2.IMREAD_GRAYSCALE)
-    overlay_manager = DataSliceManager(overlay_folder_path)
-    overlay_manager.z_range = z_range
-    
-    print(f"Found {len(overlay_manager.z_values)} overlay files")
-    
-    # Process each overlay
-    for z_value in overlay_manager.z_values:
-        overlay = overlay_manager.get_data(z_value)
-        if overlay is None:
-            continue
-            
-        print(f"Processing overlay for z-value: {z_value}")
-        
-        # Add these debug prints right after loading the overlay
-        print(f"Initial overlay unique values: {np.unique(overlay)}")
-        print(f"Initial overlay > 0 count: {np.count_nonzero(overlay > 0)}")
+        # Check if required files/folders exist
+        if not os.path.exists(ppm_path):
+            raise FileNotFoundError(f"PPM file not found: {ppm_path}")
+        if not os.path.exists(ppm_mask_path):
+            raise FileNotFoundError(f"PPM mask file not found: {ppm_mask_path}")
+        if not os.path.exists(overlay_folder_path):
+            raise FileNotFoundError(f"Overlay folder not found: {overlay_folder_path}")
 
-        # Check the initial rows/cols
-        rows, cols = np.where(overlay > 0)
-        print(f"Initial rows/cols count: {len(rows)}")
+        # Create/load zarr
+        if not os.path.exists(zarr_path):
+            zarr.create(shape=zarr_size, chunks=zarr_chunks, dtype=np.uint8, 
+                       store=zarr_path, fill_value=0)
         
-        # Filter using ppm_mask
-        if ppm_mask is not None:
-            print(f"PPM mask shape: {ppm_mask.shape}")
-            print(f"PPM mask unique values: {np.unique(ppm_mask)}")
-            mask = ppm_mask[rows, cols] > 0
-            print(f"Points remaining after ppm_mask: {np.count_nonzero(mask)}")
-            rows = rows[mask]
-            cols = cols[mask]
-            
-        print(f"Overlay shape: {overlay.shape}")
-        print(rows.shape, cols.shape)
-        # Get 3D points
-        coords = np.stack([rows, cols], axis=-1).astype(np.float64)
-        xyz_points = ppm.ijk_interpolator(coords)
+        z = zarr.open(zarr_path, mode='r+')
+        if isinstance(z, zarr.hierarchy.Group):
+            z = z[0]
         
-        # Apply offset from normal
-        if z_value != surf_val:
-            normals = ppm.normal_interpolator(coords)
-            xyz_points += dir * normals * (z_value - surf_val)
+        # Load PPM and mask
+        ppm = Ppm.loadPpm(Path(ppm_path))
+        ppm.loadData()
+        ppm_mask = cv2.imread(ppm_mask_path, cv2.IMREAD_GRAYSCALE)
+        overlay_manager = DataSliceManager(overlay_folder_path)
+        overlay_manager.z_range = z_range
         
-        # Convert to voxel coordinates and filter out-of-bounds points
-        voxel_coords = xyz_points.astype(np.int32)
-        print(f"Voxel coord ranges before bounds check:")
-        print(f"X: {voxel_coords[:,0].min()}-{voxel_coords[:,0].max()}")
-        print(f"Y: {voxel_coords[:,1].min()}-{voxel_coords[:,1].max()}")
-        print(f"Z: {voxel_coords[:,2].min()}-{voxel_coords[:,2].max()}")
-        print(f"Voxel coords shape: {voxel_coords.shape}")
-        print(f"Zarr size: {zarr_size}")
-
-        # zarr coords are z,y,x voxels coords are xyz here...
-        mask = (
-            (voxel_coords[:, 2] >= 0) & (voxel_coords[:, 2] < zarr_size[0]) &
-            (voxel_coords[:, 1] >= 0) & (voxel_coords[:, 1] < zarr_size[1]) &
-            (voxel_coords[:, 0] >= 0) & (voxel_coords[:, 0] < zarr_size[2])
-        )
-        print(f"Points remaining after bounds check: {np.count_nonzero(mask)}")
-        valid_coords = voxel_coords[mask]
-        valid_values = overlay[rows[mask], cols[mask]]
-        print("valid_coords.shape, valid_values.shape", valid_coords.shape, valid_values.shape)
+        print(f"Processing {len(overlay_manager.z_values)} overlay files using {num_workers} workers")
         
-        print(valid_coords[:, 2].max(), valid_coords[:, 1].max(), valid_coords[:, 0].max())
-        print(valid_coords[:, 2].min(), valid_coords[:, 1].min(), valid_coords[:, 0].min())
-        print(np.unique(valid_values))
+        # Create partial function with fixed arguments
+        process_fn = partial(process_single_z, z=z, zarr_size=zarr_size, 
+                           ppm=ppm, ppm_mask=ppm_mask, overlay_manager=overlay_manager,
+                           surf_val=surf_val, radius=radius, dir=dir)
         
-        # Set initial voxels
-        z[valid_coords[:, 2], valid_coords[:, 1], valid_coords[:, 0]] = valid_values
+        # Process z-values in parallel
+        with mp.Pool(num_workers) as pool:
+            list(tqdm(
+                pool.imap(process_fn, overlay_manager.z_values),
+                total=len(overlay_manager.z_values),
+                desc="Processing z-values"
+            ))
         
-        neighbors = get_neighbors(radius)
-        for dx, dy, dz in neighbors:
-            neighbor_coords = valid_coords + np.array([dx, dy, dz])
-            #zarr zyx coords, voxel coords xyz here...
-            neighbor_mask = (
-                (neighbor_coords[:, 2] >= 0) & (neighbor_coords[:, 2] < zarr_size[0]) &
-                (neighbor_coords[:, 1] >= 0) & (neighbor_coords[:, 1] < zarr_size[1]) &
-                (neighbor_coords[:, 0] >= 0) & (neighbor_coords[:, 0] < zarr_size[2])
-            )
-            
-            # Only set neighbor voxels that are within bounds and currently 0
-            valid_neighbors = neighbor_coords[neighbor_mask]
-            if len(valid_neighbors) > 0:
-                current_values = z[valid_neighbors[:, 2], valid_neighbors[:, 1], valid_neighbors[:, 0]]
-                zero_mask = current_values == 0
-                if np.any(zero_mask):
-                    z[valid_neighbors[zero_mask, 2], 
-                      valid_neighbors[zero_mask, 1], 
-                      valid_neighbors[zero_mask, 0]] = valid_values[neighbor_mask][zero_mask]
-    
-    # process_zarr_morphology(zarr_path)
-    print("Finished processing overlays")
+        print("Finished processing overlays")
+        
+    except Exception as e:
+        error_msg = f"Error processing segment: {str(e)}"
+        if __name__ == "__main__":
+            raise Exception(error_msg)
+        print(error_msg)
+        return
 
 
 def depth_overlay_2d_to_3d_pcd(ppm_path, ppm_mask_path, overlay_folder_path, surf_val=32, layers_folder_path=None, segment_id=None):
@@ -256,47 +374,6 @@ def parse_range(range_str):
         return range(start, end + 1)  # +1 to include end value
     except ValueError:
         raise argparse.ArgumentTypeError('Range must be in format "start-end"')
-    
-def optimized_process_zarr_morphology(zarr_path, kernel_size=3, labels=None, scheduler='processes'):
-    from dask.diagnostics import ProgressBar
-    from dask_image.ndmorph import binary_closing
-    import dask
-    
-    # Configure chunk size based on kernel size
-    # chunk_size = max(64, kernel_size * 8)
-    chunk_size = 256
-    
-    with dask.config.set(scheduler=scheduler):
-        data = da.from_zarr(zarr_path, chunks=(chunk_size, chunk_size, chunk_size))
-        kernel = np.ones((kernel_size, kernel_size, kernel_size), np.uint8)
-        
-        if labels is None:
-            unique_labels = np.unique(data)
-            labels = unique_labels[unique_labels > 0]
-        elif isinstance(labels, (int, np.integer)):
-            labels = (labels,)
-        
-        # Batch process labels
-        batch_size = 3
-        for i in range(0, len(labels), batch_size):
-            batch_labels = labels[i:i+batch_size]
-            operations = []
-            
-            for label in batch_labels:
-                print(f"Processing label {label}")
-                mask = data == label
-                print("Closing holes")
-                closed_array = binary_closing(mask, kernel)
-                print("Replacing holes with label")
-                data = da.where(closed_array, label, data)
-            
-            with ProgressBar():
-                print("Computing")
-                data = data.compute()
-
-        with ProgressBar():
-            print("Writing to zarr")
-            data.to_zarr(zarr_path, overwrite=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert 2D depth overlays to 3D representations')
@@ -318,9 +395,6 @@ if __name__ == "__main__":
     parser.add_argument('--zarr-chunks', type=tuple,
                         default=(128,128,128),
                         help='Chunk size of the zarr array if needed to create')
-    parser.add_argument('--morph-labels', type=parse_label_list,
-                    default=None,
-                    help='Label values to process with morphological operations. Default: all > zero labels. Example: "[1,2]" or "[255]"')
     parser.add_argument('--z-range', type=str,
                         help='Optional range of z-values to process (e.g., "30-35")')
     parser.add_argument('--overlay-subdir', type=str,
@@ -329,18 +403,31 @@ if __name__ == "__main__":
     parser.add_argument('--radius', type=int,
                         default=0,
                         help='Radius of the additonal neighbourhood to include when projecting labels on normals')
+    parser.add_argument('--dir', type=int,
+                        default=1,
+                        help='Direction to offset points along normals, -1 to flip direction')
+    parser.add_argument('--num-workers', type=int,
+                       default=4,
+                       help='Number of worker processes for parallel processing')
 
     args = parser.parse_args()
     z_range = parse_range(args.z_range)
 
     ppm_mask_path = os.path.join(args.base_path, args.segment_id, f"{args.segment_id}_mask.png")
-    layers_folder_path = os.path.join(args.base_path, args.segment_id, "layers")
+    # layers_folder_path = os.path.join(args.base_path, args.segment_id, "layers")
     overlay_folder_path = os.path.join(args.base_path, args.segment_id, "overlays", args.overlay_subdir)
     ppm_path = os.path.join(args.base_path, args.segment_id,f"{args.segment_id}.ppm")
 
-    # depth_overlay_2d_to_3d_pcd(ppm_path, ppm_mask_path, overlay_folder_path, args.surf_val, layers_folder_path, args.segment_id)
-    depth_overlay_2d_to_3d_zarr(args.zarr_path, ppm_path, ppm_mask_path, overlay_folder_path, args.surf_val, args.zarr_size, args.zarr_chunks, z_range, args.radius)
-
-
-
-    # python single_segment_folder.py --overlay-subdir surf-mask
+    parallel_depth_overlay_2d_to_3d_zarr(
+        args.zarr_path, 
+        ppm_path, 
+        ppm_mask_path, 
+        overlay_folder_path, 
+        args.surf_val, 
+        args.zarr_size, 
+        args.zarr_chunks, 
+        z_range, 
+        args.radius,
+        args.dir,
+        args.num_workers
+    )
