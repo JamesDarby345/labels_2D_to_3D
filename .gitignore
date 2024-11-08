@@ -5,3 +5,4 @@
 .vscode
 *.ipynb
 /dev
+.DS_Store
