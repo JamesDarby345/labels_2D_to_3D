@@ -194,14 +194,19 @@ def parse_range(range_str):
     except ValueError:
         raise argparse.ArgumentTypeError('Range must be in format "start-end"')
 
+def get_all_segment_ids(base_path: str) -> list[str]:
+    """Get all folder names in base path as segment IDs"""
+    return [d for d in os.listdir(base_path) 
+            if os.path.isdir(os.path.join(base_path, d))]
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert 2D depth overlays to 3D representations')
     parser.add_argument('--base-path', type=str, 
                         default='/mnt/4TB_Volume/VS/Segments/',
                         help='Base path for segment data')
-    parser.add_argument('--segment-id', type=str,
-                        default='20240301161650',
-                        help='Segment ID')
+    parser.add_argument('--segment-ids', type=str,
+                        default='20240301161650, 20230702185753',
+                        help='Segment ID(s). Use comma-separated values for multiple IDs, or "all" to process all segments')
     parser.add_argument('--surf-val', type=int, 
                         default=32,
                         help='Value of the layer/overlay slice that specifies the surface')
@@ -235,24 +240,37 @@ if __name__ == "__main__":
     z_range = parse_range(args.z_range)
     Image.MAX_IMAGE_PIXELS = None
 
-    ppm_mask_path = os.path.join(args.base_path, args.segment_id, f"{args.segment_id}_mask.png")
-    # layers_folder_path = os.path.join(args.base_path, args.segment_id, "layers")
-    overlay_folder_path = os.path.join(args.base_path, args.segment_id, "overlays", args.overlay_subdir)
-    ppm_path = os.path.join(args.base_path, args.segment_id,f"{args.segment_id}.ppm")
+    # Handle multiple segment IDs
+    if args.segment_ids.lower() == 'all':
+        segment_ids = get_all_segment_ids(args.base_path)
+    else:
+        segment_ids = [s.strip() for s in args.segment_ids.split(',')]
+
     if args.num_workers < 1:
         args.num_workers = mp.cpu_count()
+
+    # Process each segment sequentially
+    for segment_id in segment_ids:
+        print(f"\nProcessing segment: {segment_id}")
+        ppm_mask_path = os.path.join(args.base_path, segment_id, f"{segment_id}_mask.png")
+        overlay_folder_path = os.path.join(args.base_path, segment_id, "overlays", args.overlay_subdir)
+        ppm_path = os.path.join(args.base_path, segment_id, f"{segment_id}.ppm")
         
-    parallel_depth_overlay_2d_to_3d_zarr(
-        args.zarr_path, 
-        ppm_path, 
-        ppm_mask_path, 
-        overlay_folder_path, 
-        args.surf_val, 
-        args.zarr_size, 
-        args.zarr_chunks, 
-        z_range, 
-        args.radius,
-        args.dir,
-        args.num_workers,
-        args.chunk_size
-    )
+        try:
+            parallel_depth_overlay_2d_to_3d_zarr(
+                args.zarr_path, 
+                ppm_path, 
+                ppm_mask_path, 
+                overlay_folder_path, 
+                args.surf_val, 
+                args.zarr_size, 
+                args.zarr_chunks, 
+                z_range, 
+                args.radius,
+                args.dir,
+                args.num_workers,
+                args.chunk_size
+            )
+        except Exception as e:
+            print(f"Error processing segment {segment_id}: {str(e)}")
+            continue
