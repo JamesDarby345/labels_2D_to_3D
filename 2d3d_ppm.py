@@ -73,7 +73,7 @@ def generate_chunks(width: int, height: int, chunk_size: int):
             ))
     return chunks
 
-def process_chunk(chunk_coords, z_values, z, zarr_size, ppm_path, ppm_mask, overlay_manager, surf_val, radius, dir):
+def process_chunk(chunk_coords, z_values, z, zarr_size, ppm_path, ppm_mask, overlay_manager, surf_val, dir):
     """Process a single spatial chunk across all z-values"""
     # Load just the PPM header
     ppm = Ppm.loadPpm(Path(ppm_path))
@@ -128,7 +128,7 @@ def process_chunk(chunk_coords, z_values, z, zarr_size, ppm_path, ppm_mask, over
 
 def parallel_depth_overlay_2d_to_3d_zarr(zarr_path, ppm_path, ppm_mask_path, overlay_folder_path, surf_val=32, 
                                zarr_size=(256,256,256), zarr_chunks=(128,128,128), z_range=None, 
-                               radius=1, dir=1, num_workers=4, chunk_size=1024):
+                               dir=1, num_workers=4, chunk_size=1024):
     try:
         # Check if required files/folders exist
         if not os.path.exists(ppm_path):
@@ -165,7 +165,7 @@ def parallel_depth_overlay_2d_to_3d_zarr(zarr_path, ppm_path, ppm_mask_path, ove
                             z=z, zarr_size=zarr_size, 
                             ppm_path=ppm_path, ppm_mask=ppm_mask, 
                             overlay_manager=overlay_manager,
-                            surf_val=surf_val, radius=radius, dir=dir)
+                            surf_val=surf_val, dir=dir)
         
         # Process chunks in parallel
         with mp.Pool(num_workers) as pool:
@@ -202,7 +202,7 @@ def get_all_segment_ids(base_path: str) -> list[str]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert 2D depth overlays to 3D representations')
     parser.add_argument('--base-path', type=str, 
-                        default='/mnt/4TB_Volume/VS/Segments/',
+                        default='/Users/jamesdarby/Desktop/test_segs',
                         help='Base path for segment data')
     parser.add_argument('--segment-ids', type=str,
                         default='20240301161650, 20230702185753',
@@ -211,11 +211,17 @@ if __name__ == "__main__":
                         default=32,
                         help='Value of the layer/overlay slice that specifies the surface')
     parser.add_argument('--zarr-path', type=str,
-                        default='/home/james/Documents/VS/labels_2D_to_3D/s1_791um_label.zarr',
+                        default='/Users/jamesdarby/Documents/VesuviusScroll/GP/labels_2D_to_3D/s1_791um_label.zarr',
                         help='Path to zarr file location')
     parser.add_argument('--zarr-size', type=tuple,
                         default=(14376, 8096, 7888),
                         help='Size of the zarr array if needed to create')
+    '''
+    s1_volume_shape = (14376, 8096, 7888)    # scroll1_791um (z,y,x) 
+    s2_volume_shape = (14428, 10112, 11984)  # scroll2_791um (z,y,x)
+    s3_volume_shape = (9778, 3400, 3550)     # scroll3_791um (z,y,x)
+    s4_volume_shape = (11174, 3440, 3340)    # scroll4_791um (z,y,x)
+    '''
     parser.add_argument('--zarr-chunks', type=tuple,
                         default=(128,128,128),
                         help='Chunk size of the zarr array if needed to create')
@@ -263,7 +269,6 @@ if __name__ == "__main__":
                 args.zarr_size, 
                 args.zarr_chunks, 
                 z_range, 
-                args.radius,
                 args.dir,
                 args.num_workers,
                 args.chunk_size
