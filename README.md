@@ -19,7 +19,7 @@ conda activate 2d3d
 ```
 
 ## Data format & Usage
-The main files, `single_segment_folder.py` and `multi_segment_folder.py` are expecting a folder structure similar
+The main file, `ppm_2d3d.py` is expecting a folder structure similar
 to the segments on the Vesuvius download server. Ex:
 
 ```
@@ -40,18 +40,20 @@ to the segments on the Vesuvius download server. Ex:
       - xxxxxxx_34.jpg
 ```
 
-The `single_segment_folder.py` file uses the .ppm file to map the 2d coordinates to 3d space, and the overlay number to project the overlay label 
-along the .ppm normal to the correct position. The output is saved to a zarr. 
+The `ppm_2d3d.py` file uses the .ppm file to map the 2d coordinates to 3d space, and the overlay number to project the overlay label along the .ppm normal to the correct position. The output is saved to a zarr. 
 It takes in a `--surf-val` parameter, the number of the .tif defining the surface of the .ppm for this calculation
 (the default is 32, which is correct for the 7.91um segment, 64 for the 3.24um segments).
 
 **It also takes:**<br>
 `--base-path` which should be the path to the folder containing the segment folders<br>
-`--segment-id` to specify which segment id it should run on<br>
+`--segment-ids` to specify which segment id's it should run on, you can use "all" to run on all the segments in the base path<br>
 `--zarr-path` to specify the path to the zarr to update or create with the new ppm mapped labels<br>
 If a zarr doesnt exist at the specified path, it uses `--zarr-size` and `--zarr-chunks` to initialise a new empty zarr<br>
 `--z-range` optionally limits the range of overlay values to use<br>
 `--overlay-subdir` specifies which subdirectories in the overlays folder to use as the overlays to map, useful for different label sets (ink, fibres surface etc)<br>
+`--chunk-size` defines how large each parralelised chunk should be, the memory requirements of the code will depend on how
+large this value is and how many processes (cpu corse by default) are running. The default of 2048 works well
+`--num_workers` defines how many processes to run, by default it is 0, which will use all available cpu cores. If you are running out of RAM, reduces this to use fewer processes, or reduce the chunk_size.
 
 The other arguments are documented in the code and are less important
 
@@ -59,22 +61,18 @@ An example command running the file with most arguments would be like this, thou
 .py file if you prefer
 
 ```
-python single_segment_folder.py --base-path path/to/segments --segment-id 20240301161650 --zarr-path path/to/overlay.zarr
+python ppm_2d3d.py --base-path path/to/segments --segment-ids 20240301161650, 20230702185753 --zarr-path path/to/overlay.zarr
 --z-range "30-35" --overlay-subdir surface-labels --zarr-size (14376, 8096, 7888) --zarr-chunks (128,128,128)
 ```
-
-The `multi_segment_folder.py` file is similar to the `single_segment_folder.py` file, but it instead runs on 
-all the segment folders that exist in the base path folder. Though the `--segment-ids` argument can be used to run on 
-a specified subset.
 
 Both these files run utilising all the CPU cores, and use progress bars to display their progress. I may release a v2 using CUDA
 to accelerate this operation even further perhaps.
 
-The resulting zarr uses uint8 and is fairly sparse, so should be around 1-100GB depending on how many segments you map. The
+The resulting zarr uses uint8 and is fairly sparse, so should be around 1~100GB depending on how many segments you map. The
 code can map more segments/overlays to an already existing overlay zarr. Operation on one of the smaller segments with 3 overlays 
 took ~ 90s on a macbook pro M2 Max. the values in the zarr will be the same as the value of the label in the overlay image.
 
-The bigger the segment and the more overlay z values used the longer it will take.
+The bigger the segment, the more segments and the more overlay z values used the longer it will take.
 
 ## Results
 To visualise the resulting zarr array overtop of the original scan data, I recommend using [Vesuvius-GUI](https://github.com/jrudolph/vesuvius-gui) by jrudolph.
