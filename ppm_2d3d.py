@@ -224,9 +224,6 @@ if __name__ == "__main__":
     parser.add_argument('--overlay-subdir', type=str,
                         default='surf-mask',
                         help='Subdirectory name under overlays/ containing the overlay files')
-    parser.add_argument('--radius', type=int,
-                        default=0,
-                        help='Radius of the additonal neighbourhood to include when projecting labels on normals')
     parser.add_argument('--dir', type=int,
                         default=1,
                         help='Direction to offset points along normals, -1 to flip direction')
