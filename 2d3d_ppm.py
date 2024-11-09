@@ -9,6 +9,7 @@ import multiprocessing as mp
 from tqdm import tqdm
 from functools import partial
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None  # Disable DecompressionBomb warning/error
 
 class DataSliceManager:
     def __init__(self, data_folder_path: str):
