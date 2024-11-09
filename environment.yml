@@ -10,10 +10,11 @@ dependencies:
   - open3d
   - opencv
   - tqdm
-  - pytorch
   - zarr
   - dask
+  - dask-image
   - tqdm
+  - pillow
   - pip:
     - fastmorph
 

@@ -1,12 +1,15 @@
 import pathlib
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
+import mmap
 
 # PPM class for loading and interpolating PPM data
 # Taken from Khartes implementation, thanks Chuck!
+# Updated to provide chunked loading and interpolators for parallel processing
 class Ppm():
 
     def __init__(self):
+        self.mmap = None
         self.data = None
         self.ijks = None
         self.normals = None
@@ -16,6 +19,7 @@ class Ppm():
         self.valid = False
         self.error = "no error message set"
         self.path = None
+        self._header_size = 0
 
     def createErrorPpm(err):
         ppm = Ppm()
@@ -49,67 +53,65 @@ class Ppm():
         sijks += norms*(ks-32)
         return sijks
 
+    def get_subsection(self, start_row, end_row, start_col, end_col):
+        """Get a view of a subsection of the PPM data"""
+        if self.data is None:
+            self.loadData()
+        
+        subsection = np.ndarray((end_row - start_row, end_col - start_col, 6), 
+                               dtype=np.float64,
+                               buffer=self.mmap,
+                               offset=self._header_size + (start_row * self.width + start_col) * 8 * 6,
+                               strides=(self.width * 8 * 6, 8 * 6, 8))
+        
+        return subsection
 
     def loadData(self):
         if self.data is not None:
             return
-        print("reading data from %s for %s"%(str(self.path), self.name))
-
-        fstr = str(self.path)
-        print("reading ppm data for", self.path)
+        
         if not self.path.exists():
-            err="ppm file %s does not exist"%fstr
-            print(err)
-            return Ppm.createErrorPpm(err)
+            return Ppm.createErrorPpm(f"ppm file {self.path} does not exist")
 
         try:
-            fd = self.path.open("rb")
+            fd = open(self.path, "rb")
+            self.mmap = mmap.mmap(fd.fileno(), 0, access=mmap.ACCESS_READ)
+            
+            # Find header size
+            header_end = self.mmap.find(b'<>\n')
+            if header_end < 0:
+                return Ppm.createErrorPpm("No header found")
+            self._header_size = header_end + 3
+            
+            # Create memory mapped array
+            data_size = self.height * self.width * 8 * 6
+            self.data = np.ndarray((self.height, self.width, 6), 
+                                 dtype=np.float64,
+                                 buffer=self.mmap,
+                                 offset=self._header_size)
+            
+            self.ijks = self.data[:,:,:3]
+            self.normals = self.data[:,:,3:]
+            
+            # Create interpolators for the full dataset
+            ii = np.arange(self.height)
+            jj = np.arange(self.width)
+            self.ijk_interpolator = RegularGridInterpolator(
+                (ii, jj), self.ijks, fill_value=0., bounds_error=False)
+            self.normal_interpolator = RegularGridInterpolator(
+                (ii, jj), self.normals, fill_value=0., bounds_error=False)
+            
         except Exception as e:
-            err="Failed to open ppm file %s: %s"%(fstr, e)
-            print(err)
-            return Ppm.createErrorPpm(err)
+            return Ppm.createErrorPpm(f"Failed to mmap ppm file: {str(e)}")
 
-        try:
-            bdata = fd.read()
-        except Exception as e:
-            err="Failed to read ppm file %s: %s"%(fstr, e)
-            print(err)
-            return Ppm.createErrorPpm(err)
-
-        index = bdata.find(b'<>\n')
-        if index < 0:
-            err="Ppm file %s does not have a header"%fstr
-            print(err)
-            return Ppm.createErrorPpm(err)
-
-        bdata = bdata[index+3:]
-        lbd = len(bdata)
-        height = self.height
-        width = self.width
-        le = height*width*8*6
-        if lbd != le:
-            err="Ppm file %s expected %d bytes of data, got %d"%(fstr, le, lbd)
-            print(err)
-            return Ppm.createErrorPpm(err)
-
-        raw = np.frombuffer(bdata, dtype=np.float64)
-        self.data = np.reshape(raw, (height,width,6))
-        self.ijks = self.data[:,:,:3]
-        self.normals = self.data[:,:,3:]
-        print(self.ijks.shape, self.normals.shape)
-        # print(self.ijks[0,0,:],self.normals[0,0,:])
-        # print(self.ijks[3000,3000,:],self.normals[3000,3000,:])
-        ii = np.arange(height)
-        jj = np.arange(width)
-        self.ijk_interpolator = RegularGridInterpolator((ii, jj), self.ijks, fill_value=0., bounds_error=False)
-        self.normal_interpolator = RegularGridInterpolator((ii, jj), self.normals, fill_value=0., bounds_error=False)
-
-
+    def __del__(self):
+        if self.mmap is not None:
+            self.mmap.close()
 
     # reads and loads the header of the ppm file
     def loadPpm(filename):
         fstr = str(filename)
-        print("reading ppm header for", filename)
+        # print("reading ppm header for", filename)
         if not filename.exists():
             err="ppm file %s does not exist"%fstr
             print(err)
@@ -191,5 +193,28 @@ class Ppm():
         ppm.width = width
         ppm.path = filename
         ppm.name = filename.stem
-        print("created ppm %s width %d height %d"%(ppm.name, ppm.width, ppm.height))
+        # print("created ppm %s width %d height %d"%(ppm.name, ppm.width, ppm.height))
         return ppm
+
+    def loadChunk(self, start_row, end_row, start_col, end_col):
+        """Load a chunk of PPM data and set up interpolators that work with global coordinates"""
+        self.chunk_data = self.get_subsection(start_row, end_row, start_col, end_col)
+        self.chunk_ijks = self.chunk_data[:,:,:3]
+        self.chunk_normals = self.chunk_data[:,:,3:]
+        
+        # Create interpolators for the chunk that accept global coordinates
+        chunk_rows = np.arange(start_row, end_row)
+        chunk_cols = np.arange(start_col, end_col)
+        
+        self.chunk_ijk_interpolator = RegularGridInterpolator(
+            (chunk_rows, chunk_cols), self.chunk_ijks, 
+            fill_value=0., bounds_error=False)
+        self.chunk_normal_interpolator = RegularGridInterpolator(
+            (chunk_rows, chunk_cols), self.chunk_normals, 
+            fill_value=0., bounds_error=False)
+
+    def getLoadedChunk(self):
+        """Return the currently loaded chunk data"""
+        if not hasattr(self, 'chunk_data'):
+            raise ValueError("No chunk loaded. Call loadChunk first.")
+        return self.chunk_data

@@ -57,9 +57,16 @@ def process_chunk(coords, zarr_path, compute_chunks, radius, morph_labels, fast_
         
     arr = np.array(chunk_data)  
     arr = np.pad(arr, pad_width=radius, mode='constant', constant_values=0)
-    arr = fastmorph.dilate(arr, parallel=fast_morph_parallel)
-    arr = fastmorph.erode(arr, parallel=fast_morph_parallel)
-    processed = arr[radius:-radius,radius:-radius,radius:-radius]
+    # arr = fastmorph.dilate(arr, parallel=fast_morph_parallel)
+    # arr = fastmorph.erode(arr, parallel=fast_morph_parallel)
+    # processed = arr[radius:-radius,radius:-radius,radius:-radius]
+
+    original_arr = np.copy(arr)  # Explicitly use np.copy() for deep copy
+    morph_arr = fastmorph.dilate(arr, parallel=fast_morph_parallel)
+    morph_arr = fastmorph.erode(morph_arr, parallel=fast_morph_parallel)
+    mask = (original_arr > 0) & (morph_arr == 0)
+    morph_arr[mask] = original_arr[mask]
+    processed = morph_arr[radius:-radius,radius:-radius,radius:-radius]
     
     write_zarr_compute_chunk(zarr_array, processed, compute_chunks, (z,y,x))
 
@@ -137,7 +144,7 @@ def inplace_morph_close_chunks_zarr(zarr_path, chunk_size=512, radius=16, morph_
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Perform morphological closing on zarr arrays')
     parser.add_argument('--zarr-path', type=str, 
-                      default="/Users/jamesdarby/Documents/VesuviusScroll/GP/labels_2D_to_3D/s1_791um_label.zarr",
+                      default='/home/james/Documents/VS/labels_2D_to_3D/s1_791um_label.zarr',
                       help='Path to input zarr array')
     parser.add_argument('--chunk-size', type=int, default=512,
                       help='Size of dask chunks for morphological processing; recommened to be a multiple of the zarr chunk size')
