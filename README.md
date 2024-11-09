@@ -1,4 +1,6 @@
 # 2D -> 3D
+<img width="750" alt="Screenshot 2024-11-04 at 1 48 37 PM" src="https://github.com/user-attachments/assets/ad87d376-cf0a-4cd3-883a-49436e929e0e"><br>
+Point cloud visualisation of two different segment fibre labels (blue & pink) projected back to 3d and projected along ppm normals for 2d depth annotation to 3d. The code is this repo writes to volumetric zarrs.
 
 ## Purpose of this repo
 The purpose of this repo is to allow for the mapping of 2d labels with depth from the segments, 
